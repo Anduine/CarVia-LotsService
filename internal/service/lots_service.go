@@ -1,55 +1,119 @@
 package service
 
 import (
+	"bytes"
 	"context"
-	"errors"
+	"encoding/json"
+	"fmt"
 	"io"
-	"log"
+	"log/slog"
+	"lots-service/internal/domain"
 	"mime/multipart"
-	"os"
+	"net/http"
 	"path/filepath"
-	"server/internal/domain"
+	"time"
 
 	"github.com/google/uuid"
 )
 
 type LotsService struct {
-	repo domain.LotsRepository
+	repo              domain.LotsRepository
+	storageServiceURL string
+	httpClient        http.Client
 }
 
-func NewLotsService(repo domain.LotsRepository) *LotsService {
-	return &LotsService{repo: repo}
+func NewLotsService(repo domain.LotsRepository, storageServiceURL string) *LotsService {
+	return &LotsService{
+		repo:              repo,
+		storageServiceURL: storageServiceURL,
+		httpClient:        http.Client{Timeout: 10 * time.Second},
+	}
+}
+
+func (s *LotsService) StorageRequest(requestURL string, requestBody io.Reader, contentType string) error {
+	req, err := http.NewRequest("POST", requestURL, requestBody)
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Content-Type", contentType)
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("помилка запиту до storage: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("storage повернув помилку: %d, %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	return nil
 }
 
 func (s *LotsService) SaveImages(files []*multipart.FileHeader) ([]string, error) {
-	var savedPaths []string
+	var newReqBody bytes.Buffer
+	writer := multipart.NewWriter(&newReqBody)
+
+	var generatedNames []string
 
 	for _, fileHeader := range files {
-		imgFile, err := fileHeader.Open()
+		file, err := fileHeader.Open()
 		if err != nil {
-			log.Println("Помилка відкриття файлу:", err)
+			slog.Debug("Помилка відкриття файлу", "err", err.Error())
 			return nil, err
 		}
-		defer imgFile.Close()
 
-		filename := uuid.New().String() + filepath.Ext(fileHeader.Filename)
-		path := filepath.Join("internal/storage/cars", filename)
-		dst, err := os.Create(path)
+		ext := filepath.Ext(fileHeader.Filename)
+		newFilename := fmt.Sprintf("%s%s", uuid.New().String(), ext)
+		generatedNames = append(generatedNames, newFilename)
+
+		part, err := writer.CreateFormFile("files", newFilename)
 		if err != nil {
-			log.Println("Помилка збереження файлу:", err)
-			return nil, err
-		}
-		defer dst.Close()
-
-		if _, err := io.Copy(dst, imgFile); err != nil {
-			log.Println("Помилка копіювання файлу:", err)
+			file.Close()
+			slog.Debug("Помилка створення форми", "err", err.Error())
 			return nil, err
 		}
 
-		savedPaths = append(savedPaths, filename)
+		if _, err := io.Copy(part, file); err != nil {
+			file.Close()
+			slog.Debug("Помилка копіювання файлу", "err", err.Error())
+			return nil, err
+		}
+
+		file.Close()
 	}
-	
-	return savedPaths, nil
+
+	err := writer.Close()
+	if err != nil {
+		slog.Debug("Помилка закриття writer", "err", err.Error())
+		return nil, err
+	}
+
+	requestURL := fmt.Sprintf("%s/api/storage/upload_images", s.storageServiceURL)
+	s.StorageRequest(requestURL, &newReqBody, writer.FormDataContentType())
+
+	return generatedNames, nil
+}
+
+func (s *LotsService) DeleteImages(filenames []string) error {
+	if len(filenames) == 0 {
+		return nil
+	}
+
+	// JSON: {"filenames": ["a.jpg", "b.jpg"]}
+	payload, err := json.Marshal(map[string][]string{
+		"filenames": filenames,
+	})
+	if err != nil {
+		return err
+	}
+
+	requestURL := fmt.Sprintf("%s/api/storage/delete_images", s.storageServiceURL)
+	s.StorageRequest(requestURL, bytes.NewBuffer(payload), "application/json")
+
+	return nil
 }
 
 func (s *LotsService) GetLotsCount() (int, error) {
@@ -65,11 +129,12 @@ func (s *LotsService) GetLotByID(userID, lotID int) (*domain.Lot, error) {
 }
 
 func (s *LotsService) GetPageLots(userID, page, limit int) (*[]domain.Lot, error) {
-	return s.repo.GetPageLots(userID, page, limit)
+	lots, _, err := s.repo.GetLotsByParams(userID, page, limit, "", "", "", "", "", "")
+	return lots, err
 }
 
-func (s *LotsService) GetLotsByParams(userID int, brand, model, minPrice, maxPrice, minYear, maxYear string, page, limit int) (*[]domain.Lot, error) {
-	return s.repo.GetLotsByParams(userID, brand, model, minPrice, maxPrice, minYear, maxYear, page, limit)
+func (s *LotsService) GetLotsByParams(userID int, page, limit int, brand, model, minPrice, maxPrice, minYear, maxYear string) (*[]domain.Lot, int, error) {
+	return s.repo.GetLotsByParams(userID, page, limit, brand, model, minPrice, maxPrice, minYear, maxYear)
 }
 
 func (s *LotsService) GetBrands() (*[]domain.Brand, error) {
@@ -88,11 +153,57 @@ func (s *LotsService) GetUserLikedLots(userID int) (*[]domain.Lot, error) {
 	return s.repo.GetUserLikedLots(userID)
 }
 
-func (s *LotsService) CreateLot(ctx context.Context, lot *domain.Lot) error {
+func (s *LotsService) CreateLot(ctx context.Context, lot *domain.Lot, files []*multipart.FileHeader) error {
+	if len(files) > 0 {
+		images, err := s.SaveImages(files)
+		if err != nil {
+			return fmt.Errorf("помилка збереження зображень: %w", err)
+		}
+		lot.Images = images
+	}
+
 	return s.repo.CreateLot(ctx, lot)
 }
 
-func (s *LotsService) UpdateLot(ctx context.Context, lot *domain.Lot) error {
+func (s *LotsService) UpdateLot(ctx context.Context, lot *domain.Lot, newFiles []*multipart.FileHeader, deleteImages []string, oldImages []string) error {
+	existingLot, err := s.repo.GetLotByID(lot.SellerID, lot.LotID)
+	if err != nil {
+		return err
+	}
+
+	if existingLot.SellerID != lot.SellerID {
+		return fmt.Errorf("sellerID не співпадає з userID")
+	}
+
+	if len(deleteImages) > 0 {
+		if err := s.DeleteImages(deleteImages); err != nil {
+			slog.Warn("Помилка видалення зображень", "err", err.Error())
+		}
+	}
+
+	var newImageNames []string
+	if len(newFiles) > 0 {
+		newImageNames, err = s.SaveImages(newFiles)
+		if err != nil {
+			return err
+		}
+	}
+
+	deletedSet := make(map[string]bool)
+	for _, img := range deleteImages {
+		deletedSet[img] = true
+	}
+
+	var finalImages []string
+	for _, img := range oldImages {
+		if !deletedSet[img] {
+			finalImages = append(finalImages, img)
+		}
+	}
+	finalImages = append(finalImages, newImageNames...)
+
+	lot.Images = finalImages
+
 	return s.repo.UpdateLot(ctx, lot)
 }
 
@@ -102,14 +213,19 @@ func (s *LotsService) DeleteLot(ctx context.Context, lotID, userID int) error {
 		return err
 	}
 	if lot.SellerID != userID {
-		return errors.New("not authorized")
+		return fmt.Errorf("sellerID не співпадає з userID")
 	}
 
-	for _, img := range lot.Images {
-		os.Remove("internal/storage/cars/" + img)
+	if err := s.repo.DeleteLot(ctx, lotID); err != nil {
+		return err
 	}
-	
-	return s.repo.DeleteLot(ctx, lotID)
+
+	if err := s.DeleteImages(lot.Images); err != nil {
+		slog.Warn("Помилка очистки зображень", "lotID", lotID, "err", err.Error())
+		return err
+	}
+
+	return nil
 }
 
 func (s *LotsService) LikeLot(userID, lotID int) error {
@@ -126,7 +242,7 @@ func (s *LotsService) BuyLot(userID, lotID int) error {
 		return err
 	}
 	if lot.SaleStatus == "Продано" {
-		return errors.New("лот уже продано")
+		return fmt.Errorf("лот вже продано")
 	}
 
 	return s.repo.MarkLotAsSold(lotID)

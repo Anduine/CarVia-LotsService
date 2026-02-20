@@ -2,31 +2,28 @@ package main
 
 import (
 	"log/slog"
+	_ "lots-service/docs"
+	"lots-service/internal/app"
+	"lots-service/internal/config"
+	"lots-service/internal/lib/logger"
+
 	"os"
-
-	"server/internal/app"
-	"server/internal/config"
-
-	slogplus "server/internal/lib/logger"
 )
 
+//	@title			Lots Service API
+//	@version		1.0
+//	@description	This is a lots microservice.
+
+//	@host		localhost:3011
+//	@BasePath	/
+
+// @securityDefinitions.apiKey	ApiKeyAuth
+// @in							header
+// @name						Authorization
 func main() {
 	config := config.MustLoadConfig()
 
-	log := setupPlusSlog()
+	logger.InitGlobalLogger(os.Stdout, slog.LevelDebug)
 
-	app.Run(log, config.Port, config.Timeout, config.DBConnector)
-}
-
-
-func setupPlusSlog() *slog.Logger {
-	opts := slogplus.PlusHandlerOptions{
-		SlogOpts: &slog.HandlerOptions{
-			Level: slog.LevelDebug,
-		},
-	}
-
-	handler := opts.NewPlusHandler(os.Stdout)
-
-	return slog.New(handler)
+	app.Run(config)
 }

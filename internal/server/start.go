@@ -11,30 +11,27 @@ import (
 	"time"
 )
 
-func StartServer(log *slog.Logger, router http.Handler, port string, timeout time.Duration) {
+func StartServer(router http.Handler, port string, timeout time.Duration) {
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%s", port),
 		Handler: router,
 	}
 
-	// Канал для остановки сервера
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
-	// Запуск сервера в отдельной горутине
 	go func() {
-		log.Info(fmt.Sprintf("Lots service running on port %s", port))
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Error("Server error: ", slog.Any("Error", err))
+		slog.Info("Lots service running on port: " + port)
+		err := server.ListenAndServe()
+		if err != nil && err != http.ErrServerClosed {
+			slog.Error("Server error: ", "Error", err)
 		}
 	}()
 
-	// Ожидание сигнала завершения
 	<-stop
-	log.Info("Shutting down server...")
+	slog.Info("Shutting down server...")
 
-	// Завершение работы сервера
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	log.Info("Shutdown ", slog.Any("stopcode", server.Shutdown(ctx)))
+	slog.Info("Shutdown ", "stopcode", server.Shutdown(ctx))
 }

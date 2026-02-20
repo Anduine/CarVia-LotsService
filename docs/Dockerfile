@@ -3,6 +3,6 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-COPY docs/config.yaml configs/config.yaml
+COPY configs/container.config.yaml configs/config.yaml
 RUN go build -o /cmd/app/main ./cmd/app/main.go
 CMD [ "/cmd/app/main" ]

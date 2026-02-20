@@ -4,8 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
-	"server/internal/domain"
+	"log/slog"
+	"lots-service/internal/domain"
 	"strings"
 
 	"github.com/lib/pq"
@@ -15,7 +15,7 @@ type PostgresLotsRepo struct {
 	db *sql.DB
 }
 
-func NewPostgresLotsRepo(db *sql.DB) *PostgresLotsRepo{
+func NewPostgresLotsRepo(db *sql.DB) *PostgresLotsRepo {
 	return &PostgresLotsRepo{db: db}
 }
 
@@ -25,10 +25,10 @@ func (r *PostgresLotsRepo) GetLotsCount() (int, error) {
 
 	if err != nil {
 		if err == sql.ErrNoRows {
-			log.Println("Количество лотов не найдены в базе данных ", err)
+			slog.Debug("Кількість лотів не знайдено в БД", "err", err.Error())
 			return 0, err
 		}
-		log.Println("Ошибка при сканировании данных:", err)
+		slog.Debug("Помилка при скануванні даних", "err", err.Error())
 		return 0, err
 	}
 
@@ -79,82 +79,15 @@ func (r *PostgresLotsRepo) GetLotsByParamsCount(brand, model, minPrice, maxPrice
 	var lotsCount int
 	err := r.db.QueryRow(fullQuery, args...).Scan(&lotsCount)
 	if err != nil {
-		log.Println("Ошибка при получении количества лотов:", err)
+		slog.Debug("Помилка отримання кількості лотів", "err", err.Error())
 		return 0, err
 	}
 
 	return lotsCount, nil
 }
 
-func (r *PostgresLotsRepo) GetPageLots(userID, page, limit int) (*[]domain.Lot, error) {
-
-	if page < 1 {
-		page = 1
-	}
-	if limit < 1 {
-		limit = 10
-	}
-
-	offset := (page - 1) * limit
-
-	query := `
-	SELECT 
-	sl.lot_id, sl.seller_id, 
-  sl.postdate, sl.sale_price, sl.sale_status, sl.vin_code, 
-	sl.mileage, sl.color, sl.description, sl.images_paths,
-  c.car_id, c.made_year, c.engine_type, c.transmission, c.wheel_drive,
-	b.brand_name, m.model_name,
-	EXISTS (
-		SELECT 1 FROM liked_lots ll WHERE ll.user_id = $3 AND ll.lot_id = sl.lot_id
-	)
-	FROM sell_lots sl
-	JOIN cars c ON sl.car_id = c.car_id
-	JOIN brands b ON c.brand_id = b.brand_id
-	JOIN models m ON c.model_id = m.model_id
-	ORDER BY postdate DESC
-	LIMIT $1 OFFSET $2;
-	`
-
-	queryRows, err := r.db.Query(query, limit, offset, userID)
-	if err != nil {
-		log.Println("Лоты не найдены в базе данных: ", err)
-		return nil, err
-	}
-	defer queryRows.Close()
-
-	var lots []domain.Lot
-	for queryRows.Next() {
-		var lot domain.Lot
-		var images pq.StringArray
-		err := queryRows.Scan(
-			&lot.LotID, &lot.SellerID, 
-			&lot.PostDate, &lot.SalePrice, &lot.SaleStatus, &lot.VinCode, 
-			&lot.Mileage, &lot.Color, &lot.Description, &images,
-			&lot.Car.CarID, &lot.Car.MadeYear, &lot.Car.Engine,
-			&lot.Car.Transmission, &lot.Car.WheelDrive, 
-			&lot.Car.Brand, &lot.Car.Model,
-			&lot.IsLiked,
-		)
-		if err != nil {
-			log.Println("Ошибка при сканировании данных:", err)
-			return nil, err
-		}
-		
-		if images != nil {
-			lot.Images = images
-		} else {
-			lot.Images = []string{}
-		}
-
-		lots = append(lots, lot)
-	}
-
-	return &lots, nil
-}
-
-func (r *PostgresLotsRepo) GetLotsByParams( userID int,
-	brand, model, minPrice, maxPrice, minYear, maxYear string,
-	page, limit int) (*[]domain.Lot, error) {
+func (r *PostgresLotsRepo) GetLotsByParams(userID int, page, limit int,
+	brand, model, minPrice, maxPrice, minYear, maxYear string) (*[]domain.Lot, int, error) {
 
 	baseQuery := `
 	SELECT 
@@ -162,15 +95,7 @@ func (r *PostgresLotsRepo) GetLotsByParams( userID int,
 	sl.postdate, sl.sale_price, sl.sale_status, sl.vin_code, 
 	sl.mileage, sl.color, sl.description, sl.images_paths,
 	c.car_id, c.made_year, c.engine_type, c.transmission, c.wheel_drive,
-	b.brand_name, m.model_name,
-	EXISTS (
-		SELECT 1 FROM liked_lots ll WHERE ll.user_id = $1 AND ll.lot_id = sl.lot_id
-	)
-	FROM sell_lots sl
-	JOIN cars c ON sl.car_id = c.car_id
-	JOIN brands b ON c.brand_id = b.brand_id
-	JOIN models m ON c.model_id = m.model_id
-	WHERE 1=1
+	b.brand_name, m.model_name
 	`
 
 	var args []any
@@ -183,8 +108,23 @@ func (r *PostgresLotsRepo) GetLotsByParams( userID int,
 		argCounter++
 	}
 
-	args = append(args, userID)
-	argCounter++
+	if userID > 0 {
+		args = append(args, userID)
+		argCounter++
+
+		baseQuery += ", EXISTS ( SELECT 1 FROM liked_lots ll WHERE ll.user_id = $1 AND ll.lot_id = sl.lot_id )"
+	} else {
+		baseQuery += ", false"
+	}
+
+	baseQuery += ", COUNT(*) OVER() "
+
+	baseQuery += `
+	FROM sell_lots sl
+	JOIN cars c ON sl.car_id = c.car_id
+	JOIN brands b ON c.brand_id = b.brand_id
+	JOIN models m ON c.model_id = m.model_id
+	WHERE 1=1`
 
 	if brand != "" {
 		addCondition("b.brand_name =", brand)
@@ -205,6 +145,13 @@ func (r *PostgresLotsRepo) GetLotsByParams( userID int,
 		addCondition("c.made_year <=", maxYear)
 	}
 
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 {
+		limit = 10
+	}
+
 	offset := (page - 1) * limit
 	// Добавляем ORDER BY, LIMIT и OFFSET напрямую (LIMIT и OFFSET через args)
 	query := baseQuery + "\n" + strings.Join(conditions, "\n") +
@@ -213,32 +160,34 @@ func (r *PostgresLotsRepo) GetLotsByParams( userID int,
 
 	queryRows, err := r.db.Query(query, args...)
 	if err != nil {
-		log.Println("Лоты не найдены в базе данных: ", err)
-		return nil, err
+		slog.Debug("Лоти не знайдені", "err", err.Error())
+		return nil, 0, err
 	}
 	defer queryRows.Close()
 
 	var lots []domain.Lot
+	var totalCount int = 0
 
 	for queryRows.Next() {
 		var lot domain.Lot
 		var images pq.StringArray
 		err := queryRows.Scan(
-			&lot.LotID, &lot.SellerID, 
-			&lot.PostDate, &lot.SalePrice, &lot.SaleStatus, &lot.VinCode, 
-			&lot.Mileage, &lot.Color, &lot.Description, &images,
+			&lot.LotID, &lot.SellerID,
+			&lot.PostDate, &lot.SalePrice, &lot.SaleStatus, &lot.Car.VinCode,
+			&lot.Car.Mileage, &lot.Car.Color, &lot.Description, &images,
 			&lot.Car.CarID, &lot.Car.MadeYear, &lot.Car.Engine,
-			&lot.Car.Transmission, &lot.Car.WheelDrive, 
+			&lot.Car.Transmission, &lot.Car.WheelDrive,
 			&lot.Car.Brand, &lot.Car.Model,
 			&lot.IsLiked,
+			&totalCount,
 		)
 		if err != nil {
-			log.Println("Ошибка при сканировании:", err)
+			slog.Debug("Помилка при скануванні", "err", err.Error())
 			continue
 		}
 
 		if images != nil {
-		lot.Images = images
+			lot.Images = images
 		} else {
 			lot.Images = []string{}
 		}
@@ -246,7 +195,7 @@ func (r *PostgresLotsRepo) GetLotsByParams( userID int,
 		lots = append(lots, lot)
 	}
 
-	return &lots, nil
+	return &lots, totalCount, nil
 }
 
 func (r *PostgresLotsRepo) GetLotByID(userID, lotID int) (*domain.Lot, error) {
@@ -272,9 +221,9 @@ func (r *PostgresLotsRepo) GetLotByID(userID, lotID int) (*domain.Lot, error) {
 	var lot domain.Lot
 	var images pq.StringArray
 	err := row.Scan(
-		&lot.LotID, &lot.SellerID, 
-		&lot.PostDate, &lot.SalePrice, &lot.SaleStatus, &lot.VinCode, 
-		&lot.Mileage, &lot.Color, &lot.Description, &images,
+		&lot.LotID, &lot.SellerID,
+		&lot.PostDate, &lot.SalePrice, &lot.SaleStatus, &lot.Car.VinCode,
+		&lot.Car.Mileage, &lot.Car.Color, &lot.Description, &images,
 		&lot.Car.CarID, &lot.Car.MadeYear, &lot.Car.Engine,
 		&lot.Car.Transmission, &lot.Car.WheelDrive,
 		&lot.Car.Brand, &lot.Car.BrandID, &lot.Car.Model, &lot.Car.ModelID,
@@ -283,12 +232,12 @@ func (r *PostgresLotsRepo) GetLotByID(userID, lotID int) (*domain.Lot, error) {
 
 	if err != nil {
 		if err == sql.ErrNoRows {
-				log.Println("Лот не найден в базе данных ", err)
-				return nil, err
+			slog.Debug("Лот не знайдено в БД", "err", err.Error(), "LotID", lotID)
+			return nil, err
 		}
-		log.Println("Ошибка при сканировании данных:", err)
+		slog.Debug("Помилка при скануванні", "err", err.Error(), "LotID", lotID)
 		return nil, err
-  }
+	}
 
 	if images != nil {
 		lot.Images = images
@@ -296,9 +245,7 @@ func (r *PostgresLotsRepo) GetLotByID(userID, lotID int) (*domain.Lot, error) {
 		lot.Images = []string{}
 	}
 
-	// log.Println("Лот найден:", lot)
-
-  return &lot, nil
+	return &lot, nil
 }
 
 func (r *PostgresLotsRepo) GetBrands() (*[]domain.Brand, error) {
@@ -306,7 +253,7 @@ func (r *PostgresLotsRepo) GetBrands() (*[]domain.Brand, error) {
 
 	queryRows, err := r.db.Query(query)
 	if err != nil {
-		log.Println("Brands does not exist", err)
+		slog.Debug("Бренди не знайдені в БД", "err", err.Error())
 		return nil, err
 	}
 	defer queryRows.Close()
@@ -319,7 +266,7 @@ func (r *PostgresLotsRepo) GetBrands() (*[]domain.Brand, error) {
 			&brand.BrandID, &brand.BrandName,
 		)
 		if err != nil {
-			log.Println("Error while scanning:", err)
+			slog.Debug("Помилка при скануванні", "err", err.Error())
 			return nil, err
 		}
 
@@ -342,7 +289,7 @@ func (r *PostgresLotsRepo) GetModels(brandName string) (*[]domain.Model, error) 
 
 	queryRows, err := r.db.Query(query, brandName)
 	if err != nil {
-		log.Println("Модели не найдены в базе данных ", err)
+		slog.Debug("Моделі не знайдені", "err", err.Error())
 		return nil, err
 	}
 	defer queryRows.Close()
@@ -355,7 +302,7 @@ func (r *PostgresLotsRepo) GetModels(brandName string) (*[]domain.Model, error) 
 			&model.ModelID, &model.BrandID, &model.ModelName,
 		)
 		if err != nil {
-			log.Println("Ошибка при сканировании данных:", err)
+			slog.Debug("Помилка при скануванні", "err", err.Error())
 			return nil, err
 		}
 
@@ -381,26 +328,26 @@ func (r *PostgresLotsRepo) GetUserPostedLots(userID int) (*[]domain.Lot, error) 
 	// strUserID, _ := strconv.Atoi(userID)
 	queryRows, err := r.db.Query(query, userID)
 	if err != nil {
-		log.Println("Лоты данного пользователя не найдены в базе данных ", err)
+		slog.Debug("Лоти від користувача не знайдені в БД", "err", err.Error(), "userID", userID)
 		return nil, err
 	}
 	defer queryRows.Close()
 
 	var lots []domain.Lot
-	
+
 	for queryRows.Next() {
 		var lot domain.Lot
 		var images pq.StringArray
 		err := queryRows.Scan(
-			&lot.LotID, &lot.SellerID, 
-			&lot.PostDate, &lot.SalePrice, &lot.SaleStatus, &lot.VinCode, 
-			&lot.Mileage, &lot.Color, &lot.Description, &images,
+			&lot.LotID, &lot.SellerID,
+			&lot.PostDate, &lot.SalePrice, &lot.SaleStatus, &lot.Car.VinCode,
+			&lot.Car.Mileage, &lot.Car.Color, &lot.Description, &images,
 			&lot.Car.CarID, &lot.Car.MadeYear, &lot.Car.Engine,
-			&lot.Car.Transmission, &lot.Car.WheelDrive, 
+			&lot.Car.Transmission, &lot.Car.WheelDrive,
 			&lot.Car.Brand, &lot.Car.Model,
 		)
 		if err != nil {
-			log.Println("Ошибка при сканировании:", err)
+			slog.Debug("Помилка при скануванні", "err", err.Error(), "LotID", lot.LotID)
 			continue
 		}
 
@@ -433,26 +380,26 @@ func (r *PostgresLotsRepo) GetUserLikedLots(userID int) (*[]domain.Lot, error) {
 	// strUserID, _ := strconv.Atoi(userID)
 	queryRows, err := r.db.Query(query, userID)
 	if err != nil {
-		log.Println("Лоты лайкнутые пользователем не найдены в базе данных ", err)
+		slog.Debug("Лоти лайкнуті користувачем не знайдені в БД", "err", err.Error())
 		return nil, err
 	}
 	defer queryRows.Close()
 
 	var lots []domain.Lot
-	
+
 	for queryRows.Next() {
 		var lot domain.Lot
 		var images pq.StringArray
 		err := queryRows.Scan(
-			&lot.LotID, &lot.SellerID, 
-			&lot.PostDate, &lot.SalePrice, &lot.SaleStatus, &lot.VinCode, 
-			&lot.Mileage, &lot.Color, &lot.Description, &images,
+			&lot.LotID, &lot.SellerID,
+			&lot.PostDate, &lot.SalePrice, &lot.SaleStatus, &lot.Car.VinCode,
+			&lot.Car.Mileage, &lot.Car.Color, &lot.Description, &images,
 			&lot.Car.CarID, &lot.Car.MadeYear, &lot.Car.Engine,
-			&lot.Car.Transmission, &lot.Car.WheelDrive, 
+			&lot.Car.Transmission, &lot.Car.WheelDrive,
 			&lot.Car.Brand, &lot.Car.Model,
 		)
 		if err != nil {
-			log.Println("Ошибка при сканировании:", err)
+			slog.Debug("Помилка при скануванні", "err", err.Error())
 			continue
 		}
 
@@ -475,10 +422,12 @@ func (r *PostgresLotsRepo) CreateLot(ctx context.Context, lot *domain.Lot) error
 	}
 	defer tx.Rollback()
 
+	var saleStatus = "Продається"
+
 	var brandID int
 	err = tx.QueryRowContext(ctx, "SELECT brand_id FROM brands WHERE brand_name = $1", lot.Car.Brand).Scan(&brandID)
 	if err != nil {
-		log.Println("Бренд не знайдено: ", err)
+		slog.Debug("Бренди не знайдені в БД", "err", err.Error())
 		return err
 	}
 
@@ -488,7 +437,7 @@ func (r *PostgresLotsRepo) CreateLot(ctx context.Context, lot *domain.Lot) error
 		WHERE model_name = $1 AND brand_id = $2
 	`, lot.Car.Model, brandID).Scan(&modelID)
 	if err != nil {
-		log.Println("Модель не знайдено: ", err)
+		slog.Debug("Модель не знайдено в БД", "err", err.Error())
 		return err
 	}
 
@@ -499,7 +448,7 @@ func (r *PostgresLotsRepo) CreateLot(ctx context.Context, lot *domain.Lot) error
 		RETURNING car_id
 	`, lot.Car.MadeYear, lot.Car.Engine, lot.Car.Transmission, lot.Car.WheelDrive, brandID, modelID, lot.Description).Scan(&carID)
 	if err != nil {
-		log.Println("Помилка у додаванні машини: ", err)
+		slog.Debug("Помилка при додаванні машини", "err", err.Error())
 		return err
 	}
 
@@ -510,13 +459,12 @@ func (r *PostgresLotsRepo) CreateLot(ctx context.Context, lot *domain.Lot) error
 		)
 		VALUES ($1, $2, CURRENT_DATE, $3, $4, $5, $6, $7, $8, $9)
 	`,
-		lot.SellerID, carID, lot.SalePrice, "Продається",
-		lot.VinCode, lot.Mileage, lot.Color,
+		lot.SellerID, carID, lot.SalePrice, saleStatus,
+		lot.Car.VinCode, lot.Car.Mileage, lot.Car.Color,
 		lot.Description, pq.Array(lot.Images),
 	)
 	if err != nil {
-		log.Println("Помилка у додаванні лота: ", err)
-		log.Println("Seller Id: ", lot.SellerID)
+		slog.Debug("Помилка у додаванні лота", "err", err.Error(), "SellerID: ", lot.SellerID)
 		return err
 	}
 
@@ -547,8 +495,8 @@ func (r *PostgresLotsRepo) UpdateLot(ctx context.Context, lot *domain.Lot) error
 	_, err = tx.ExecContext(ctx, `
 		UPDATE sell_lots SET seller_id = $1, sale_price = $2, sale_status = $3, vin_code = $4, color = $5, mileage = $6, description = $7, images_paths = $8
 		WHERE lot_id = $9
-	`, lot.SellerID, lot.SalePrice, lot.SaleStatus, lot.VinCode, lot.Color, lot.Mileage, lot.Description, pq.Array(lot.Images), lot.LotID)
-	
+	`, lot.SellerID, lot.SalePrice, lot.SaleStatus, lot.Car.VinCode, lot.Car.Color, lot.Car.Mileage, lot.Description, pq.Array(lot.Images), lot.LotID)
+
 	return err
 }
 
@@ -561,7 +509,7 @@ func (r *PostgresLotsRepo) LikeLot(userID, lotID int) error {
 	query := `INSERT INTO liked_lots (user_id, lot_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`
 	_, err := r.db.Exec(query, userID, lotID)
 	if err != nil {
-		log.Println("Не вдалося додати лайк:", err)
+		slog.Debug("Не вдалося додати лайк", "err", err.Error())
 		return err
 	}
 
@@ -572,7 +520,7 @@ func (r *PostgresLotsRepo) UnlikeLot(userID, lotID int) error {
 	query := `DELETE FROM liked_lots WHERE user_id = $1 AND lot_id = $2`
 	_, err := r.db.Exec(query, userID, lotID)
 	if err != nil {
-		log.Println("Не вдалося прибрати лайк:", err)
+		slog.Debug("Не вдалося прибрати лайк", "err", err.Error())
 		return err
 	}
 
@@ -583,4 +531,3 @@ func (r *PostgresLotsRepo) MarkLotAsSold(lotID int) error {
 	_, err := r.db.Exec(`UPDATE sell_lots SET sale_status = 'Продано' WHERE lot_id = $1`, lotID)
 	return err
 }
-

@@ -1,0 +1,109 @@
+basePath: /
+definitions:
+  domain.Car:
+    properties:
+      brand:
+        type: string
+      brandID:
+        type: integer
+      carID:
+        type: integer
+      engine:
+        type: string
+      madeYear:
+        type: integer
+      model:
+        type: string
+      modelID:
+        type: integer
+      transmission:
+        type: string
+      wheelDrive:
+        type: string
+    type: object
+  domain.Lot:
+    properties:
+      car:
+        $ref: '#/definitions/domain.Car'
+      color:
+        type: string
+      description:
+        type: string
+      images:
+        items:
+          type: string
+        type: array
+      isLiked:
+        type: boolean
+      lotID:
+        type: integer
+      mileage:
+        type: integer
+      postDate:
+        type: string
+      salePrice:
+        type: integer
+      saleStatus:
+        type: string
+      sellerID:
+        type: integer
+      vinCode:
+        type: string
+    type: object
+  responseHTTP.ErrorResponse:
+    properties:
+      code:
+        type: integer
+      message:
+        type: string
+    type: object
+externalDocs:
+  description: OpenAPI
+  url: https://swagger.io/resources/open-api
+host: localhost:8080
+info:
+  contact: {}
+  description: This is a sample server celler server.
+  termsOfService: http://swagger.io/terms/
+  title: Lots Service API
+  version: "1.0"
+paths:
+  /api/lots/id/{lot_id}:
+    get:
+      consumes:
+      - application/json
+      description: Get Lot by ID
+      parameters:
+      - description: Account ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/domain.Lot'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/responseHTTP.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/responseHTTP.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/responseHTTP.ErrorResponse'
+      summary: Get Lot by ID
+      tags:
+      - Lots
+securityDefinitions:
+  ApiKeyAuth:
+    in: header
+    name: Authorization
+    type: apiKey
+swagger: "2.0"
