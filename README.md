@@ -1,32 +1,41 @@
-# CarVia 🌐 API Gateway
+# CarVia 🚗 Lots Service
 
-Центральна точка входу для всіх клієнтських запитів.
+Сервіс для роботи з оголошеннями про продаж автомобілів.
 
 ## 🛠 Технології
 
 - Go
-- net/http
-- Reverse Proxy
+- PostgreSQL
+- REST API
 
 ## ⚙️ Функціонал
 
-- Маршрутизація запитів до мікросервісів:
-  - Lots Service
-  - SSO Service
-  - Storage Service
-- Обробка CORS
-- Логування запитів
-- Агрегація відповідей (за потреби)
+- CRUD операції з лотами
+- Фільтрація та пошук
+- Пагінація
+- Лайки (обрані лоти)
+- Перевірка авторизації
 
-### ⚠️ Примітка
+## 📡 Основні ендпоінти
 
-Gateway не містить бізнес-логіки — тільки проксування.
+- `/api/lots/filtered` - отримання лотів за параметрами
+- `/api/lots/id/{lot_id}` - отримання лота по ID
+- `/api/lots/brands` - отримання брендів
+- `/api/lots/models` - отримання моделей за брендом
+- `/api/lots/create_lot` - створення лота
+- `/api/lots/update_lot/{lot_id}` - оновлення лота
+- `/api/lots/delete_lot/{lot_id}` - видалення лота
+- `/api/lots/likes/{lot_id}` - лайк / дизлайк
+- `/api/lots/buy_lot/{lot_id}` Купівля лота
 
-## 📡 Маршрути
+## 🗄 База даних
 
-- `/api/lots/*` → Lots Service
-- `/api/sso/*` → SSO Service
-- `/api/storage/*` → Storage Service
+- Таблиці:
+  - `sell_lots`
+  - `cars`
+  - `brands`
+  - `models`
+  - `liked_lots`
 
 ## 🚀 Запуск
 
